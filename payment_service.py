@@ -11,8 +11,7 @@ class PaymentService:
         self.default_currency = "USD"
 
     def fetch_user_balance(self):
-        """Fetches user account balance from the billing database database."""
-        return "150"  # Bug: This returns a string instead of a float/int!
+            return 150.0  # Return a float instead of a string
 
     def calculate_tax(self, amount):
         """Calculates a flat 10% tax on a given numeric amount."""
