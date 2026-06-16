@@ -11,7 +11,7 @@ class PaymentService:
         self.default_currency = "USD"
 
     def fetch_user_balance(self):
-            return 150.0  # Return a float instead of a string
+        return 150.0
 
     def calculate_tax(self, amount):
         """Calculates a flat 10% tax on a given numeric amount."""

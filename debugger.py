@@ -142,6 +142,48 @@ def verify_syntax(file_path):
     except Exception as e:
         return False, str(e)
 
+def verify_runtime_execution(file_path, class_name, method_name):
+    """Generates and executes a dynamic test script to verify that the patched method runs without crashing."""
+    module_name = os.path.splitext(os.path.basename(file_path))[0]
+    
+    test_script_content = f"""
+import sys
+try:
+    from {module_name} import {class_name}
+    obj = {class_name}()
+    result = getattr(obj, '{method_name}')()
+    print(f"VERIFICATION_SUCCESS: Returned {{result}}")
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+"""
+    # Write temp test script
+    temp_test_path = "temp_test_runner.py"
+    with open(temp_test_path, 'w', encoding='utf-8') as f:
+        f.write(test_script_content)
+        
+    try:
+        result = subprocess.run(
+            [sys.executable, temp_test_path],
+            capture_output=True,
+            text=True
+        )
+        # Clean up temp test script
+        if os.path.exists(temp_test_path):
+            os.remove(temp_test_path)
+            
+        if result.returncode == 0:
+            return True, result.stdout.strip()
+        else:
+            # Combine stdout and stderr for the full error report
+            err_output = (result.stdout + "\n" + result.stderr).strip()
+            return False, err_output
+    except Exception as e:
+        if os.path.exists(temp_test_path):
+            os.remove(temp_test_path)
+        return False, str(e)
+
 def extract_specific_function_body(class_code, function_name):
     """Slices a specific method's block out of a class's source code block."""
     lines = class_code.split("\n")
@@ -213,7 +255,7 @@ def main():
     """
     
     print("==================================================")
-    print("STARTING VERSION 7.0: DEPENDENCY-AWARE AGENTIC DEBUGGER")
+    print("STARTING VERSION 8.0: CLOSED-LOOP AGENTIC DEBUGGER")
     print("==================================================\n")
 
     # STEP 1: WORKSPACE DISCOVERY
@@ -329,7 +371,7 @@ Respond with ONLY this identifier. Do not write any explanations, markdown backt
         print(f"❌ Error: Could not find class or module matching '{class_part}' in discovered classes.")
         return
         
-    # TOOL STEP: CONTEXT REDUCTION (Now with Dependency-Aware Slicing)
+    # TOOL STEP: CONTEXT REDUCTION (With Dependency-Aware Slicing)
     print("--- [TOOL USE] Programmatically Slicing Targeted Code & Dependencies ---")
     
     # AST Trace dependency calls
@@ -433,11 +475,7 @@ Please provide the corrected python code block inside [PATCH] and [/PATCH] tags.
         if apply_patch_to_file(target_class['file_path'], start_l, end_l, patch_code):
             print("Patch applied. Verifying syntax correctness...")
             success, err_msg = verify_syntax(target_class['file_path'])
-            if success:
-                print("✅ Syntax verification SUCCEEDED! Code repaired successfully.")
-                repaired_successfully = True
-                break
-            else:
+            if not success:
                 print("❌ Syntax verification FAILED!")
                 print(f"Compiler Error:\n{err_msg}\n")
                 
@@ -460,13 +498,45 @@ Please fix the syntax error and generate a new, correct code block wrapped in [P
                 ])
                 confirm_text = confirm_completion.choices[0].message.content
                 current_attempt += 1
+                continue
+
+            print("✅ Syntax verification SUCCEEDED. Running dynamic runtime verification...")
+            run_success, run_output = verify_runtime_execution(target_class['file_path'], target_class['class_name'], method_part)
+            
+            if run_success:
+                print(f"✅ Dynamic runtime verification SUCCEEDED! {run_output}")
+                repaired_successfully = True
+                break
+            else:
+                print("❌ Dynamic runtime verification FAILED!")
+                print(f"Runtime Traceback:\n{run_output}\n")
+                
+                # Rollback
+                with open(target_class['file_path'], 'w', encoding='utf-8') as f:
+                    f.write(backup_content)
+                
+                print(f"Attempt {current_attempt}/{max_retries} failed. Querying LLM for correction...")
+                correction_prompt = f"""The previous patch compiled successfully but failed runtime verification with the following traceback/error output:
+\"\"\"
+{run_output}
+\"\"\"
+
+Please fix the logic error and generate a new, correct code block wrapped in [PATCH] and [/PATCH] tags."""
+                
+                confirm_completion = client.chat.completions.create(model=CLOUD_MODEL, messages=[
+                    {"role": "user", "content": confirmation_prompt},
+                    {"role": "assistant", "content": confirm_text},
+                    {"role": "user", "content": correction_prompt}
+                ])
+                confirm_text = confirm_completion.choices[0].message.content
+                current_attempt += 1
         else:
             print("❌ Error: Failed to write patch to file.")
             break
             
     if repaired_successfully:
         print("\n==================== FINAL COMPREHENSIVE AI REPORT ====================")
-        print("Status: Repaired & Verified")
+        print("Status: Repaired & Verified (Syntax + Dynamic Runtime Exec)")
         print(f"Modified File: {target_class['file_path']}")
         print(f"Modified Target Method: {patched_method}")
         print("\nApplied Patch Block:")
