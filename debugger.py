@@ -1,241 +1,26 @@
 # debugger.py
 import os
-import ast
-import re
-import sys
-import subprocess
-import textwrap
-import chromadb
 from groq import Groq
 from dotenv import load_dotenv
 
+# Import modularized components
+from ast_utils import (
+    discover_classes_in_workspace,
+    find_internal_dependencies,
+    find_method_line_range,
+    extract_specific_function_body
+)
+from rag_engine import initialize_and_index_db, query_relevant_classes
+from repair_engine import (
+    apply_patch_to_file,
+    verify_syntax,
+    verify_runtime_execution,
+    extract_patch,
+    get_patched_method_name
+)
+
 # Load environment variables from .env file
 load_dotenv()
-
-def discover_classes_in_workspace(directory="."):
-    """Walks the workspace directory, parses Python files via AST, and extracts all class information."""
-    classes_info = []
-    for root, dirs, files in os.walk(directory):
-        # Exclude directories we don't want to scan
-        dirs[:] = [d for d in dirs if d not in ('venv', '.git', '__pycache__')]
-        for file in files:
-            if file.endswith('.py') and file != 'debugger.py':
-                file_path = os.path.join(root, file)
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    tree = ast.parse(content)
-                    for node in ast.walk(tree):
-                        if isinstance(node, ast.ClassDef):
-                            class_name = node.name
-                            docstring = ast.get_docstring(node) or f"Class {class_name} defined in {file}."
-                            
-                            # Extract raw class code block
-                            class_lines = content.split('\n')
-                            start_line = node.lineno - 1
-                            end_line = getattr(node, 'end_lineno', len(class_lines))
-                            class_code = '\n'.join(class_lines[start_line:end_line])
-                            
-                            # Extract list of method definitions
-                            methods = [n.name for n in node.body if isinstance(n, ast.FunctionDef)]
-                            
-                            classes_info.append({
-                                'class_name': class_name,
-                                'file_path': file_path,
-                                'docstring': docstring,
-                                'code': class_code,
-                                'methods': methods
-                            })
-                except Exception as e:
-                    print(f"⚠️ Warning: Failed to parse {file_path}: {e}")
-    return classes_info
-
-def find_internal_dependencies(class_code, method_name):
-    """Parses class source code using AST to find self.method_name(...) calls inside the target method."""
-    try:
-        tree = ast.parse(class_code)
-        target_fn = None
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == method_name:
-                target_fn = node
-                break
-        
-        if not target_fn:
-            return []
-            
-        dependencies = []
-        for node in ast.walk(target_fn):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                if isinstance(node.func.value, ast.Name) and node.func.value.id == 'self':
-                    dependencies.append(node.func.attr)
-        return list(set(dependencies))
-    except Exception as e:
-        print(f"⚠️ Error tracing dependencies: {e}")
-        return []
-
-def find_method_line_range(file_path, class_name, method_name):
-    """Parses a file and returns the line range (0-indexed start, 1-indexed end) of a specific method."""
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        tree = ast.parse(content)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef) and node.name == class_name:
-                for subnode in node.body:
-                    if isinstance(subnode, ast.FunctionDef) and subnode.name == method_name:
-                        start_line = subnode.lineno - 1
-                        end_line = getattr(subnode, 'end_lineno', len(content.split('\n')))
-                        return start_line, end_line
-    except Exception as e:
-        print(f"⚠️ Error finding method line range: {e}")
-    return None, None
-
-def apply_patch_to_file(file_path, start_line, end_line, new_code):
-    """Replaces target lines in a file with the patched code block, matching target indentation."""
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        
-        # Read the indentation level of the method we are replacing
-        original_first_line = lines[start_line]
-        indentation = len(original_first_line) - len(original_first_line.lstrip())
-        
-        # Adjust new_code indentation if necessary
-        new_lines = new_code.split('\n')
-        non_empty_lines = [l for l in new_lines if l.strip()]
-        if non_empty_lines:
-            min_indent = min(len(l) - len(l.lstrip()) for l in non_empty_lines)
-            adjusted_new_lines = []
-            for line in new_lines:
-                if line.strip():
-                    adjusted_new_lines.append(" " * indentation + line[min_indent:])
-                else:
-                    adjusted_new_lines.append("")
-            patched_code = '\n'.join(adjusted_new_lines)
-        else:
-            patched_code = new_code
-
-        # Replace lines in original list
-        lines[start_line:end_line] = [patched_code + '\n']
-        
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.writelines(lines)
-        return True
-    except Exception as e:
-        print(f"⚠️ Error applying patch: {e}")
-        return False
-
-def verify_syntax(file_path):
-    """Compiles the source file using the current Python environment to verify syntax."""
-    try:
-        result = subprocess.run(
-            [sys.executable, '-m', 'py_compile', file_path],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            return True, ""
-        else:
-            return False, result.stderr
-    except Exception as e:
-        return False, str(e)
-
-def verify_runtime_execution(file_path, class_name, method_name):
-    """Generates and executes a dynamic test script to verify that the patched method runs without crashing."""
-    module_name = os.path.splitext(os.path.basename(file_path))[0]
-    
-    test_script_content = f"""
-import sys
-try:
-    from {module_name} import {class_name}
-    obj = {class_name}()
-    result = getattr(obj, '{method_name}')()
-    print(f"VERIFICATION_SUCCESS: Returned {{result}}")
-except Exception as e:
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
-"""
-    # Write temp test script
-    temp_test_path = "temp_test_runner.py"
-    with open(temp_test_path, 'w', encoding='utf-8') as f:
-        f.write(test_script_content)
-        
-    try:
-        result = subprocess.run(
-            [sys.executable, temp_test_path],
-            capture_output=True,
-            text=True
-        )
-        # Clean up temp test script
-        if os.path.exists(temp_test_path):
-            os.remove(temp_test_path)
-            
-        if result.returncode == 0:
-            return True, result.stdout.strip()
-        else:
-            # Combine stdout and stderr for the full error report
-            err_output = (result.stdout + "\n" + result.stderr).strip()
-            return False, err_output
-    except Exception as e:
-        if os.path.exists(temp_test_path):
-            os.remove(temp_test_path)
-        return False, str(e)
-
-def extract_specific_function_body(class_code, function_name):
-    """Slices a specific method's block out of a class's source code block."""
-    lines = class_code.split("\n")
-    target_block = []
-    capture = False
-    indent_level = None
-    
-    for line in lines:
-        stripped = line.lstrip()
-        # Find where function definition starts
-        if stripped.startswith(f"def {function_name}("):
-            capture = True
-            target_block.append(line)
-            # Calculate the indentation level of the method definition
-            indent_level = len(line) - len(stripped)
-            continue
-            
-        if capture:
-            # If line is not empty and has an indent level less than or equal to the method definition's indent, stop
-            if stripped:
-                current_indent = len(line) - len(stripped)
-                if current_indent <= indent_level and not line.startswith(" " * (indent_level + 1)):
-                    break
-            target_block.append(line)
-            
-    return "\n".join(target_block)
-
-def extract_patch(text):
-    """Helper to extract contents between [PATCH] and [/PATCH] tags."""
-    match = re.search(r'\[PATCH\](.*?)\[/PATCH\]', text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return None
-
-def get_patched_method_name(patch_code):
-    """Parses patch code using AST/Regex to detect the name of the function defined inside."""
-    try:
-        try:
-            tree = ast.parse(patch_code)
-        except SyntaxError:
-            dedented = textwrap.dedent(patch_code)
-            tree = ast.parse(dedented)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
-                return node.name
-    except Exception:
-        pass
-    # Regex fallback
-    match = re.search(r'def\s+(\w+)\s*\(', patch_code)
-    if match:
-        return match.group(1)
-    return None
 
 def main():
     if not os.environ.get("GROQ_API_KEY"):
@@ -255,7 +40,7 @@ def main():
     """
     
     print("==================================================")
-    print("STARTING VERSION 8.0: CLOSED-LOOP AGENTIC DEBUGGER")
+    print("STARTING VERSION 9.0: MODULAR CLOSED-LOOP AGENTIC DEBUGGER")
     print("==================================================\n")
 
     # STEP 1: WORKSPACE DISCOVERY
@@ -268,58 +53,20 @@ def main():
 
     # STEP 2: VECTOR DB INDEXING
     print("🗂️ [STEP 2] Initializing local ChromaDB and indexing class documentation...")
-    chroma_client = chromadb.Client()
-    
-    # Reset/Create Collection
-    collection_name = "class_documentations"
-    try:
-        chroma_client.delete_collection(name=collection_name)
-    except Exception:
-        pass
-    collection = chroma_client.create_collection(name=collection_name)
-    
-    documents = []
-    metadatas = []
-    ids = []
-    
-    for i, cls in enumerate(discovered_classes):
-        documents.append(cls['docstring'])
-        metadatas.append({
-            'class_name': cls['class_name'],
-            'file_path': cls['file_path'],
-            'methods': ','.join(cls['methods']),
-        })
-        ids.append(f"class_{i}")
-        
-    if documents:
-        collection.add(
-            documents=documents,
-            metadatas=metadatas,
-            ids=ids
-        )
-        print(f"Successfully indexed {len(documents)} classes in ChromaDB.\n")
+    collection = initialize_and_index_db(discovered_classes)
+    if collection:
+        print(f"Successfully indexed {len(discovered_classes)} classes in ChromaDB.\n")
     else:
         print("❌ Error: No classes found to index.\n")
         return
 
     # STEP 3: RAG RETRIEVAL
     print("🔍 [STEP 3] Querying Vector DB with the traceback log...")
-    query_results = collection.query(
-        query_texts=[runtime_stack_trace],
-        n_results=min(3, len(discovered_classes))
-    )
+    retrieved_classes = query_relevant_classes(collection, runtime_stack_trace, discovered_classes)
     
-    retrieved_classes = []
     print("Top retrieved classes:")
-    if query_results and 'metadatas' in query_results and query_results['metadatas']:
-        for idx, metadata in enumerate(query_results['metadatas'][0]):
-            class_name = metadata['class_name']
-            file_path = metadata['file_path']
-            # Find in discovered list
-            cls_obj = next((c for c in discovered_classes if c['class_name'] == class_name), None)
-            if cls_obj:
-                retrieved_classes.append(cls_obj)
-                print(f" {idx + 1}. {class_name} ({file_path})")
+    for idx, cls in enumerate(retrieved_classes):
+        print(f" {idx + 1}. {cls['class_name']} ({cls['file_path']})")
     print()
 
     if not retrieved_classes:
