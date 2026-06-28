@@ -1,4 +1,5 @@
 # payment_service.py
+from user_service import UserService
 
 class PaymentService:
     """
@@ -9,18 +10,15 @@ class PaymentService:
     
     def __init__(self):
         self.default_currency = "USD"
-
-    def fetch_user_balance(self):
-        """Fetches user account balance from the billing database database."""
-        return "150"  # Bug: This returns a string instead of a float/int!
+        self.user_service = UserService()
 
     def calculate_tax(self, amount):
         """Calculates a flat 10% tax on a given numeric amount."""
         return amount * 0.10
 
     def apply_processing_fee(self):
-        """Applies a base processing fee to the current balance."""
-        current_balance = self.fetch_user_balance()
+        """Applies a base processing fee to the current balance fetched from user service."""
+        current_balance = self.user_service.get_user_balance(42)
         fixed_fee = 5.0
         # This line will trigger a TypeError: unsupported operand type(s) for +: 'str' and 'float'
         final_total = current_balance + fixed_fee

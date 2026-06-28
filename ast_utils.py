@@ -108,3 +108,72 @@ def extract_specific_function_body(class_code, function_name):
             target_block.append(line)
             
     return "\n".join(target_block)
+
+def find_cross_class_dependencies(file_path, class_code, method_name, discovered_classes):
+    """
+    Parses the target method and the containing file's imports using AST to find references 
+    to other classes in the workspace.
+    """
+    try:
+        # 1. Parse the containing file to extract all imports
+        with open(file_path, 'r', encoding='utf-8') as f:
+            file_content = f.read()
+        
+        file_tree = ast.parse(file_content)
+        imports = {} # maps imported class name or module name to source info
+        
+        for node in ast.walk(file_tree):
+            if isinstance(node, ast.Import):
+                for name in node.names:
+                    imports[name.name] = name.name
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                for name in node.names:
+                    imports[name.name] = module
+                    
+        # 2. Parse the target method body
+        class_tree = ast.parse(class_code)
+        target_fn = None
+        for node in ast.walk(class_tree):
+            if isinstance(node, ast.FunctionDef) and node.name == method_name:
+                target_fn = node
+                break
+                
+        if not target_fn:
+            return []
+            
+        referenced_classes = []
+        
+        # 3. Look for referenced class names in target method AST
+        for node in ast.walk(target_fn):
+            # Check names (e.g. UserService() -> Name 'UserService')
+            if isinstance(node, ast.Name):
+                name = node.id
+                if name in imports:
+                    imported_from = imports[name]
+                    for cls in discovered_classes:
+                        if cls['class_name'].lower() == name.lower() or os.path.splitext(os.path.basename(cls['file_path']))[0].lower() == imported_from.lower():
+                            referenced_classes.append(cls)
+                            
+            # Check attribute accesses (e.g. user_service.get_user_balance())
+            elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                obj_name = node.value.id
+                if obj_name in imports:
+                    imported_module = imports[obj_name]
+                    for cls in discovered_classes:
+                        if os.path.splitext(os.path.basename(cls['file_path']))[0].lower() == imported_module.lower():
+                            referenced_classes.append(cls)
+                            
+        # De-duplicate
+        unique_referenced_classes = []
+        seen = set()
+        for cls in referenced_classes:
+            key = (cls['class_name'], cls['file_path'])
+            if key not in seen:
+                seen.add(key)
+                unique_referenced_classes.append(cls)
+                
+        return unique_referenced_classes
+    except Exception as e:
+        print(f"⚠️ Error finding cross-class dependencies: {e}")
+        return []

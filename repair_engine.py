@@ -99,10 +99,26 @@ except Exception as e:
         return False, str(e)
 
 def extract_patch(text):
-    """Helper to extract contents between [PATCH] and [/PATCH] tags."""
+    """Helper to extract contents between [PATCH] and [/PATCH] tags, stripping markdown fences."""
     match = re.search(r'\[PATCH\](.*?)\[/PATCH\]', text, re.DOTALL)
     if match:
-        return match.group(1).strip()
+        content = match.group(1).strip()
+        # Clean up markdown code block fences if the LLM wrapped it inside the [PATCH] block
+        if content.startswith("```"):
+            lines = content.split('\n')
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            content = '\n'.join(lines).strip()
+        # Filter out trailing invalid tags if the LLM wrote them inside the block
+        content_lines = content.split('\n')
+        cleaned_lines = []
+        for line in content_lines:
+            if line.strip().startswith("tags:") or line.strip().startswith("Do not put"):
+                continue
+            cleaned_lines.append(line)
+        return '\n'.join(cleaned_lines).strip()
     return None
 
 def get_patched_method_name(patch_code):
