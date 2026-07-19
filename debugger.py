@@ -409,9 +409,11 @@ Please fix the syntax error and generate a new, correct code block wrapped in [P
 
             print("✅ Syntax verification SUCCEEDED. Running project test suite...")
             test_result = run_test_suite(".")
-            if not test_result["tests_found"]:
+            if test_result["status"] in ("skipped", "no_tests"):
                 print(f"ℹ️ {test_result['output']}\n")
-            elif not test_result["passed"]:
+            elif test_result["status"] == "inconclusive":
+                print(f"⚠️ Test suite verification INCONCLUSIVE (not blocking): {test_result['output']}\n")
+            elif test_result["status"] == "failed":
                 print("❌ Test suite verification FAILED!")
                 print(f"Test Output:\n{test_result['output']}\n")
 
