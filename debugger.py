@@ -27,6 +27,15 @@ from repair_engine import (
 load_dotenv()
 
 
+def truncate_output(text, limit=2000):
+    """Truncates long subprocess output to a reasonable length before feeding it into an LLM prompt."""
+    if text is None:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n... [truncated, {len(text) - limit} more characters omitted]"
+
+
 def extract_crash_entry_point(traceback_text, discovered_classes):
     """
     Parses the traceback text to find the last file and function name that belongs
@@ -413,12 +422,13 @@ Please fix the syntax error and generate a new, correct code block wrapped in [P
                 print(
                     f"Attempt {current_attempt}/{max_retries} failed. Querying LLM for correction..."
                 )
-                correction_prompt = f"""The previous patch passed syntax verification but failed the project's pytest suite with the following output:
+                truncated_test_output = truncate_output(test_result["output"])
+                correction_prompt = f"""The previous patch passed syntax verification but failed the project's pytest suite with the following output (stdout/stderr, truncated if long):
 \"\"\"
-{test_result['output']}
+{truncated_test_output}
 \"\"\"
 
-Please fix the issue and generate a new, correct code block wrapped in [PATCH] and [/PATCH] tags."""
+Look at which specific test(s) failed and why, then fix the underlying issue. Please provide the corrected code block wrapped in [PATCH] and [/PATCH] tags."""
 
                 confirm_completion = client.chat.completions.create(
                     model=CLOUD_MODEL,
