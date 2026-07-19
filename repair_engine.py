@@ -2,9 +2,11 @@
 import os
 import re
 import sys
+import shutil
 import subprocess
 import ast
 import textwrap
+import importlib.util
 
 def apply_patch_to_file(file_path, start_line, end_line, new_code):
     """Replaces target lines in a file with the patched code block, matching target indentation."""
@@ -97,6 +99,69 @@ except Exception as e:
         if os.path.exists(temp_test_path):
             os.remove(temp_test_path)
         return False, str(e)
+
+def _pytest_available():
+    """Checks whether the pytest executable/module is available in the current environment."""
+    return shutil.which("pytest") is not None or importlib.util.find_spec("pytest") is not None
+
+def _discover_test_suite(workspace_root):
+    """Walks the workspace looking for a tests/ directory, test_*.py / *_test.py files, or conftest.py."""
+    for root, dirs, files in os.walk(workspace_root):
+        dirs[:] = [d for d in dirs if d not in ('venv', '.git', '__pycache__')]
+        if os.path.basename(root) == 'tests':
+            return True
+        for f in files:
+            if f == 'conftest.py' or (f.startswith('test_') and f.endswith('.py')) or f.endswith('_test.py'):
+                return True
+    return False
+
+def run_test_suite(workspace_root="."):
+    """Runs the project's pytest suite (if one exists) and returns a structured result dict."""
+    if not _pytest_available():
+        return {
+            "tests_found": False,
+            "passed": True,
+            "output": "pytest is not installed; skipping test suite verification.",
+            "returncode": 0,
+        }
+
+    if not _discover_test_suite(workspace_root):
+        return {
+            "tests_found": False,
+            "passed": True,
+            "output": "No test suite found in workspace.",
+            "returncode": 0,
+        }
+
+    try:
+        result = subprocess.run(
+            ["pytest", "--tb=short", "-q"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=workspace_root,
+        )
+        output = (result.stdout + "\n" + result.stderr).strip()
+        return {
+            "tests_found": True,
+            "passed": result.returncode == 0,
+            "output": output,
+            "returncode": result.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "tests_found": True,
+            "passed": False,
+            "output": "Test suite timed out after 30 seconds.",
+            "returncode": -1,
+        }
+    except Exception as e:
+        return {
+            "tests_found": True,
+            "passed": False,
+            "output": str(e),
+            "returncode": -1,
+        }
 
 def extract_patch(text):
     """Helper to extract contents between [PATCH] and [/PATCH] tags, stripping markdown fences."""
